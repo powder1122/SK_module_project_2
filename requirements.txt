@@ -1,9 +1,19 @@
 # 설치 라이브러리
-streamlit
-google-generativai
-python-dotenv
-pandas
-#sqlite3 = 기본 라이브러리
-
-# 설치 명령어
-# pip install streamlit google-generativeai python-dotenv pandas
+beautifulsoup4            4.13.4
+fastapi                   0.116.1
+fastapi-cli               0.0.8
+fastapi-cloud-cli         0.1.5
+opencv-python             4.12.0.88
+pillow                    11.3.0
+pip                       25.2
+plotly                    6.3.0
+pydantic                  2.11.7
+pydantic_core             2.33.2
+pydantic-extra-types      2.10.5
+pydantic-settings         2.10.1
+python-dotenv             1.1.1
+python-magic-bin          0.4.14
+python-whois              0.9.5
+requests                  2.32.5
+streamlit                 1.48.1
+uvicorn                   0.35.0

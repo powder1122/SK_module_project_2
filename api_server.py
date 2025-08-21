@@ -125,14 +125,6 @@ async def get_domain_info(domain_name: str):
         # 생성 후 경과 시간 계산
         days_since_creation = (datetime.now() - creation_date).days if creation_date else -1
 
-        # print('----- [DEBUG] -----')
-        # print('domain_name: ', domain_info.domain_name)
-        # print('registrar: ', domain_info.registrar)
-        # print('creation_date: ', creation_date)
-        # print('expiration_date: ', domain_info.expiration_date)
-        # print('days_since_creation: ', days_since_creation)
-        # print('raw: ', domain_info)
-        # print('-'*30)
 
         # 직렬화 가능한 형태로 변환
         return {

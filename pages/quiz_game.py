@@ -56,7 +56,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- [수정됨] 문제 로딩 로직 변경 (API 호출 대신 로컬 데이터 사용) ---
+# --- 문제 로딩 로직 변경 (API 호출 대신 로컬 데이터 사용) ---
 def load_questions_from_local():
     """로컬에서 샘플 퀴즈 문제를 불러오는 함수 (API 서버가 없을 경우 대비)"""
     sample_questions = [
