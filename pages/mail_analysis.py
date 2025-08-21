@@ -13,6 +13,7 @@ from PIL import Image
 import io
 import datetime
 import numpy as np
+import requests
 
 # 페이지 설정
 st.set_page_config(
@@ -20,6 +21,9 @@ st.set_page_config(
     page_icon="📧",
     layout="wide"
 )
+
+# API 서버 주소
+API_BASE_URL = "http://127.0.0.1:8000"
 
 # OpenCV 라이브러리 가용성 확인 (QR 코드 스캔용)
 OPENCV_AVAILABLE = False
@@ -75,6 +79,35 @@ def get_email_address(header_value):
         return None
     match = re.search(r'<([^>]+)>', header_value)
     return match.group(1) if match else header_value
+
+@st.cache_data(ttl=3600) # 1시간 동안 도메인 정보 캐시
+def get_domain_info_from_api(domain_name):
+    """FastAPI 서버로부터 도메인 Whois 정보를 가져옵니다."""
+    if not domain_name:
+        return None
+    try:
+        response = requests.get(f"{API_BASE_URL}/domain_info/{domain_name}", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException:
+        # API 호출 실패 시 None 반환 (분석 중단을 막기 위함)
+        return None
+
+@st.cache_data(ttl=3600)
+def get_vt_report_from_api(endpoint, resource, api_key):
+    """FastAPI 서버로부터 VirusTotal 리포트를 가져옵니다."""
+    if not api_key or not resource: return None
+    try:
+        headers = {"x-vt-api-key": api_key}
+        if endpoint == "url":
+            response = requests.post(f"{API_BASE_URL}/report/url", params={"url": resource}, headers=headers, timeout=40)
+        else: # file
+            response = requests.get(f"{API_BASE_URL}/report/file/{resource}", headers=headers, timeout=10)
+        
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException:
+        return None
 
 # ----------------------------------------------------------------------
 # 2. 핵심 분석 로직
@@ -276,6 +309,61 @@ def analyze_url(url, results):
     results['urls'].append({'item': 'URL', 'value': details, 'status': status})
     results['riskScores']['urls'] += risk
 
+
+def analyze_reputation(unique_items, item_type, api_key, results):
+    """고유 아이템(URL, 해시) 목록의 평판 정보를 분석합니다."""
+    if not api_key: return
+    
+    endpoint = "url" if item_type == "URL" else "file"
+    
+    for item in unique_items:
+        report = get_vt_report_from_api(endpoint, item, api_key)
+        if report:
+            positives = report.get("positives", 0)
+            total = report.get("total", 0)
+            
+            if positives > 0:
+                status = 'danger'
+                risk_score = 50 # 악성으로 탐지되면 높은 점수 부여
+            else:
+                status = 'safe'
+                risk_score = 0
+            
+            result_item = {
+                'item': f'VirusTotal 평판 ({item_type})',
+                'value': f"'{item}' - 탐지율: {positives}/{total}",
+                'status': status
+            }
+
+            if item_type == "URL":
+                results['urls'].append(result_item)
+                results['riskScores']['urls'] += risk_score
+            else:
+                results['attachments'].append(result_item)
+                results['riskScores']['attachments'] += risk_score
+
+
+def analyze_domains(hostnames, results):
+    """고유 호스트네임 목록의 Whois 정보를 분석합니다."""
+    for hostname in hostnames:
+        domain_info = get_domain_info_from_api(hostname)
+        if domain_info:
+            days = domain_info.get('days_since_creation', -1)
+            if 0 <= days < 30:
+                results['urls'].append({
+                    'item': '도메인 신뢰도',
+                    'value': f"'{hostname}'은(는) 생성된 지 {days}일밖에 되지 않은 신생 도메인입니다.",
+                    'status': 'danger'
+                })
+                results['riskScores']['urls'] += 30 # URL 위험도에 점수 가중
+            else:
+                 results['urls'].append({
+                    'item': '도메인 정보',
+                    'value': f"'{hostname}' (생성일: {domain_info.get('creation_date', 'N/A')})",
+                    'status': 'info'
+                })
+
+
 def calculate_summary(results):
     """분석 결과를 종합하여 요약합니다."""
     total_score = sum(results['riskScores'].values())
@@ -347,6 +435,14 @@ def main():
     st.markdown('<div style="text-align: center;"><h1>📧 피싱 메일 분석</h1></div>', unsafe_allow_html=True)
     st.markdown('<div style="text-align: center; font-size: 1.2em; opacity: 0.9; margin-bottom: 2rem;">의심스러운 이메일 파일을 업로드하여 위험 요소를 정밀 분석해보세요</div>', unsafe_allow_html=True)
     
+    # [추가됨] VirusTotal API 키 입력
+    st.markdown("### 🔑 VirusTotal API 키 (선택 사항)")
+    vt_api_key = st.text_input(
+        "API 키를 입력하면 URL/파일 평판 조회를 통해 탐지율을 높일 수 있습니다.", 
+        type="password",
+        help="VirusTotal에 가입하여 무료 API 키를 발급받을 수 있습니다."
+    )
+
     if not OPENCV_AVAILABLE:
         st.warning("🔍 QR 코드 스캔을 위한 OpenCV 라이브러리를 찾을 수 없습니다. 'pip install opencv-python'으로 설치하시면 더 정확한 분석이 가능합니다.")
 
@@ -359,7 +455,7 @@ def main():
     )
 
     if uploaded_file is not None:
-        with st.spinner('📊 이메일을 정밀 분석 중입니다...'):
+        with st.spinner('📊 이메일을 정밀 분석 중입니다... (외부 API 조회로 인해 시간이 걸릴 수 있습니다)'):
             eml_content = uploaded_file.getvalue().decode('utf-8', errors='ignore')
             
             # 분석 실행
@@ -387,10 +483,34 @@ def main():
                         html_content = payload.decode('cp949', errors='ignore')
                     analyze_html_body(html_content, results)
 
-            calculate_summary(results)
+            # 고유 호스트네임, URL, 파일 해시 추출
+            unique_hostnames = set()
+            unique_urls = set()
+            unique_hashes = set()
 
-        # 분석 결과 표시
-        display_results(results)
+            for url_item in results['urls']:
+                try:
+                    raw_url = url_item['value'].split(' ')[0]
+                    unique_urls.add(raw_url)
+                    hostname = urlparse(unquote(raw_url)).hostname
+                    if hostname: unique_hostnames.add(hostname)
+                except Exception: continue
+            
+            for att_item in results['attachments']:
+                if att_item['item'] == '파일 해시 (SHA-256)':
+                    unique_hashes.add(att_item['value'])
+
+            # 외부 API 연동 분석
+            if unique_hostnames:
+                analyze_reputation(unique_hostnames, "도메인", vt_api_key, results) # Whois
+            if unique_urls and vt_api_key:
+                analyze_reputation(unique_urls, "URL", vt_api_key, results) # VirusTotal URL
+            if unique_hashes and vt_api_key:
+                analyze_reputation(unique_hashes, "파일 해시", vt_api_key, results) # VirusTotal File
+
+            calculate_summary(results)
+            display_results(results)
+
 
 def display_results(results):
     st.markdown("---")
@@ -456,6 +576,7 @@ def display_results(results):
     
     with tab4:
         display_section_results("URL 분석", results['urls'])
+
 
 def display_section_results(section_name, section_results):
     """각 섹션의 분석 결과를 표시합니다."""
