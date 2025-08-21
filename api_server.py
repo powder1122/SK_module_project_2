@@ -1,13 +1,25 @@
 # api_server.py
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
 from core.db_manager import DBManager
+from pydantic import BaseModel
 import os
 import uvicorn
 import whois
 from datetime import datetime
 import requests
 import time
+from dotenv import load_dotenv
+
+# .env 파일에서 환경 변수 로드
+load_dotenv()
+
+# --- 환경 변수에서 API 키 로드 ---
+VT_API_KEY = os.getenv("VT_API_KEY")
+
+class AnswerRequest(BaseModel):
+    question_id: int
+    user_choice: str
 
 # --- DB 경로 설정 및 DBManager 인스턴스 생성 ---
 # 이 파일의 위치를 기준으로 상대 경로를 계산합니다.
@@ -38,6 +50,56 @@ async def get_all_questions():
         raise HTTPException(status_code=404, detail="퀴즈 문제를 찾을 수 없습니다.")
     return questions
 
+@app.post("/submit_answer")
+async def submit_answer(answer_request: AnswerRequest):
+    """퀴즈 답변을 제출하고 결과를 반환하는 API"""
+    if db_manager is None:
+        raise HTTPException(status_code=500, detail="데이터베이스 연결에 실패했습니다.")
+    
+    try:
+        # 문제 정보 조회
+        question = db_manager.get_question_by_id(answer_request.question_id)
+        if not question:
+            raise HTTPException(status_code=404, detail="문제를 찾을 수 없습니다.")
+        
+        # 정답 확인
+        is_phishing = question['label'] == 1
+        correct_answer = '피싱' if is_phishing else '정상'
+        is_correct = answer_request.user_choice == correct_answer
+        
+        # 점수 계산
+        score_earned = 10 if is_correct else 0
+        
+        # 해설 생성 (데이터베이스의 explain 컬럼을 우선 사용)
+        if question.get('explain'):
+            # 데이터베이스에 해설이 있는 경우 사용
+            base_explanation = question['explain']
+            if is_correct:
+                explanation = f"정답입니다! {base_explanation}"
+            else:
+                explanation = f"아쉽지만 오답입니다. {base_explanation}"
+        else:
+            # 데이터베이스에 해설이 없는 경우 기본 해설 사용
+            if is_correct:
+                if is_phishing:
+                    explanation = "정답입니다! 이 메일은 피싱 메일입니다. 의심스러운 링크, 긴급성을 강조하는 문구, 개인정보 요구 등의 특징을 잘 파악하셨네요."
+                else:
+                    explanation = "정답입니다! 이 메일은 정상 메일입니다. 발신자가 명확하고, 내용이 자연스러우며, 의심스러운 요소가 없음을 잘 판단하셨습니다."
+            else:
+                if is_phishing:
+                    explanation = "아쉽지만 오답입니다. 이 메일은 피싱 메일입니다. 의심스러운 링크, 개인정보 요구, 긴급성 강조 등의 피싱 특징을 다시 한번 확인해보세요."
+                else:
+                    explanation = "아쉽지만 오답입니다. 이 메일은 정상 메일입니다. 발신자의 신뢰성, 내용의 자연스러움, 요청사항의 합리성 등을 종합적으로 판단해보세요."
+        
+        return {
+            'is_correct': is_correct,
+            'explanation': explanation,
+            'score_earned': score_earned,
+            'correct_answer': correct_answer
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"답변 처리 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/domain_info/{domain_name}")
 async def get_domain_info(domain_name: str):
@@ -84,35 +146,24 @@ async def get_domain_info(domain_name: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"도메인 '{domain_name}' 정보를 조회할 수 없습니다: {e}")
 
-@app.post("/report/url")
-async def get_url_report(url: str, x_vt_api_key: str = Header(...)):
-    """VirusTotal에 URL을 분석 요청하고 결과를 반환하는 API"""
-    if not x_vt_api_key:
-        raise HTTPException(status_code=400, detail="VirusTotal API 키가 필요합니다.")
+@app.get("/report/domain/{domain_name}")
+async def get_domain_report(domain_name: str):
+    """VirusTotal에서 도메인 리포트를 조회하는 API"""
+    if not VT_API_KEY:
+        raise HTTPException(status_code=503, detail="서버에 VirusTotal API 키가 설정되지 않았습니다.")
     
-    headers = {"x-apikey": x_vt_api_key}
+    headers = {"x-apikey": VT_API_KEY}
     
     try:
-        # URL 분석 요청
-        scan_response = requests.post(f"{VT_API_URL}/urls", headers=headers, data={"url": url})
-        scan_response.raise_for_status()
-        analysis_id = scan_response.json()['data']['id']
+        response = requests.get(f"{VT_API_URL}/domains/{domain_name}", headers=headers)
         
-        # 분석 완료까지 대기 (최대 30초)
-        report = None
-        for _ in range(10):
-            time.sleep(3)
-            report_response = requests.get(f"{VT_API_URL}/analyses/{analysis_id}", headers=headers)
-            if report_response.status_code == 200:
-                report_data = report_response.json()
-                if report_data['data']['attributes']['status'] == 'completed':
-                    report = report_data
-                    break
-        
-        if not report:
-            raise HTTPException(status_code=408, detail="VirusTotal 분석 시간이 초과되었습니다.")
+        if response.status_code == 404:
+            return {"positives": 0, "total": 0, "error": "Not found"}
 
-        stats = report['data']['attributes']['stats']
+        response.raise_for_status()
+        data = response.json()
+        
+        stats = data['data']['attributes']['last_analysis_stats']
         positives = stats.get('malicious', 0) + stats.get('suspicious', 0)
         total = sum(stats.values())
         
@@ -120,21 +171,20 @@ async def get_url_report(url: str, x_vt_api_key: str = Header(...)):
 
     except requests.exceptions.RequestException as e:
         status_code = e.response.status_code if e.response else 500
-        raise HTTPException(status_code=status_code, detail=f"VirusTotal URL 분석 오류: {e}")
+        raise HTTPException(status_code=status_code, detail=f"VirusTotal 도메인 분석 오류: {e}")
 
 
 @app.get("/report/file/{file_hash}")
-async def get_file_report(file_hash: str, x_vt_api_key: str = Header(...)):
+async def get_file_report(file_hash: str):
     """VirusTotal에서 파일 해시 리포트를 조회하는 API"""
-    if not x_vt_api_key:
-        raise HTTPException(status_code=400, detail="VirusTotal API 키가 필요합니다.")
+    if not VT_API_KEY:
+        raise HTTPException(status_code=503, detail="서버에 VirusTotal API 키가 설정되지 않았습니다.")
     
-    headers = {"x-apikey": x_vt_api_key}
+    headers = {"x-apikey": VT_API_KEY}
     
     try:
         response = requests.get(f"{VT_API_URL}/files/{file_hash}", headers=headers)
         
-        # 파일이 VT에 없는 경우 404 오류 발생
         if response.status_code == 404:
             return {"positives": 0, "total": 0, "error": "Not found"}
 

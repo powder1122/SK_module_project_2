@@ -5,14 +5,9 @@ import email
 from email.header import decode_header
 import re
 import hashlib
-import base64
 from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 import plotly.graph_objects as go
-from PIL import Image
-import io
-import datetime
-import numpy as np
 import requests
 
 # 페이지 설정
@@ -94,19 +89,16 @@ def get_domain_info_from_api(domain_name):
         return None
 
 @st.cache_data(ttl=3600)
-def get_vt_report_from_api(endpoint, resource, api_key):
+def get_vt_report_from_api(endpoint, resource):
     """FastAPI 서버로부터 VirusTotal 리포트를 가져옵니다."""
-    if not api_key or not resource: return None
+    if not resource: return None
     try:
-        headers = {"x-vt-api-key": api_key}
-        if endpoint == "url":
-            response = requests.post(f"{API_BASE_URL}/report/url", params={"url": resource}, headers=headers, timeout=40)
-        else: # file
-            response = requests.get(f"{API_BASE_URL}/report/file/{resource}", headers=headers, timeout=10)
-        
+        response = requests.get(f"{API_BASE_URL}/report/{endpoint}/{resource}", timeout=15)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        if e.response and e.response.status_code == 503:
+            st.session_state.vt_key_missing = True
         return None
 
 # ----------------------------------------------------------------------
@@ -257,111 +249,146 @@ def analyze_attachment(part, results):
 
 def analyze_url(url, results):
     """URL을 분석합니다."""
-    if not url or any(res['value'].startswith(url) for res in results['urls']):
+    if not url:
         return
 
-    status, risk, issues = 'safe', 0, []
+    # URL에서 도메인 추출
     try:
         url_obj = urlparse(unquote(url))
         hostname = url_obj.hostname
-        if not hostname: 
+        if not hostname:
             return
-
-        # IP 주소 직접 사용
-        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname):
-            risk += 40; issues.append('IP 주소 직접 사용')
-        
-        # HTTPS 미사용
-        if url_obj.scheme != 'https':
-            risk += 10; issues.append('HTTPS 미사용')
-        
-        # Punycode
-        if hostname.startswith('xn--'):
-            risk += 30; issues.append('Punycode 도메인')
-
-        # 의심스러운 TLD
-        suspicious_tlds = ['.guru', '.club', '.xyz', '.top', '.loan', '.work', '.click', '.link', '.biz', '.info']
-        if any(hostname.endswith(tld) for tld in suspicious_tlds):
-            risk += 20; issues.append('의심스러운 TLD')
-
-        # URL 내 이메일
-        if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', url_obj.query):
-            risk += 25; issues.append('URL에 이메일 주소 포함')
-
-        # 복잡한 경로
-        if len([p for p in url_obj.path.split('/') if p]) > 3:
-            risk += 15; issues.append('복잡한 URL 경로 구조')
-        
-        # 의심스러운 파라미터
-        suspicious_params = ['redirect', 'login', 'token', 'next', 'continue', 'return']
-        if any(f'{p}=' in url_obj.query for p in suspicious_params):
-            risk += 10; issues.append('의심스러운 파라미터')
-
-        if risk >= 40: status = 'danger'
-        elif risk >= 15: status = 'warn'
     except Exception:
         return
 
-    details = url
-    if issues:
-        details += f' <strong style="color:var(--{status}-color);">({", ".join(issues)})</strong>'
+    # 이미 분석된 도메인인지 확인 (중복 방지)
+    analyzed_domains = [item['value'].split(' - ')[0] for item in results['urls'] if 'Domain:' in item['value']]
+    if hostname in analyzed_domains:
+        return
+
+    status, risk, issues = 'safe', 0, []
+
+    # IP 주소 직접 사용
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname):
+        risk += 40
+        issues.append('IP 주소 직접 사용')
     
-    results['urls'].append({'item': 'URL', 'value': details, 'status': status})
+    # HTTPS 미사용
+    if url_obj.scheme != 'https':
+        risk += 10
+        issues.append('HTTPS 미사용')
+    
+    # Punycode
+    if hostname.startswith('xn--'):
+        risk += 30
+        issues.append('Punycode 도메인')
+
+    # 의심스러운 TLD
+    suspicious_tlds = ['.guru', '.club', '.xyz', '.top', '.loan', '.work', '.click', '.link', '.biz', '.info']
+    if any(hostname.endswith(tld) for tld in suspicious_tlds):
+        risk += 20
+        issues.append('의심스러운 TLD')
+
+    # URL 내 이메일
+    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', url_obj.query):
+        risk += 25
+        issues.append('URL에 이메일 주소 포함')
+
+    # 복잡한 경로
+    if len([p for p in url_obj.path.split('/') if p]) > 3:
+        risk += 15
+        issues.append('복잡한 URL 경로 구조')
+    
+    # 의심스러운 파라미터
+    suspicious_params = ['redirect', 'login', 'token', 'next', 'continue', 'return']
+    if any(f'{p}=' in url_obj.query for p in suspicious_params):
+        risk += 10
+        issues.append('의심스러운 파라미터')
+
+    if risk >= 40: status = 'danger'
+    elif risk >= 15: status = 'warn'
+
+    # 도메인만 표시하도록 수정
+    details = f'Domain: {hostname}'
+    if issues:
+        details += f' - <span class="status-{status}">({", ".join(issues)})</span>'
+    
+    results['urls'].append({'item': 'URL 도메인', 'value': details, 'status': status})
     results['riskScores']['urls'] += risk
 
 
-def analyze_reputation(unique_items, item_type, api_key, results):
-    """고유 아이템(URL, 해시) 목록의 평판 정보를 분석합니다."""
-    if not api_key: return
+def get_domain_reputation_findings(hostnames):
+    """도메인 평판 분석 결과를 리스트로 반환합니다."""
+    findings = []
+    scores = 0
     
-    endpoint = "url" if item_type == "URL" else "file"
-    
-    for item in unique_items:
-        report = get_vt_report_from_api(endpoint, item, api_key)
-        if report:
-            positives = report.get("positives", 0)
-            total = report.get("total", 0)
-            
-            if positives > 0:
-                status = 'danger'
-                risk_score = 50 # 악성으로 탐지되면 높은 점수 부여
-            else:
-                status = 'safe'
-                risk_score = 0
-            
-            result_item = {
-                'item': f'VirusTotal 평판 ({item_type})',
-                'value': f"'{item}' - 탐지율: {positives}/{total}",
-                'status': status
-            }
-
-            if item_type == "URL":
-                results['urls'].append(result_item)
-                results['riskScores']['urls'] += risk_score
-            else:
-                results['attachments'].append(result_item)
-                results['riskScores']['attachments'] += risk_score
-
-
-def analyze_domains(hostnames, results):
-    """고유 호스트네임 목록의 Whois 정보를 분석합니다."""
     for hostname in hostnames:
-        domain_info = get_domain_info_from_api(hostname)
-        if domain_info:
-            days = domain_info.get('days_since_creation', -1)
-            if 0 <= days < 30:
-                results['urls'].append({
-                    'item': '도메인 신뢰도',
-                    'value': f"'{hostname}'은(는) 생성된 지 {days}일밖에 되지 않은 신생 도메인입니다.",
+        # 1. Whois 조회
+        whois_report = get_domain_info_from_api(hostname)
+        if whois_report and whois_report.get('days_since_creation', -1) >= 0:
+            days = whois_report['days_since_creation']
+            if days < 30:
+                findings.append({
+                    'item': f'도메인 신뢰도 - {hostname}', 
+                    'value': f"생성된 지 {days}일밖에 되지 않은 신생 도메인입니다.", 
                     'status': 'danger'
                 })
-                results['riskScores']['urls'] += 30 # URL 위험도에 점수 가중
+                scores += 30
             else:
-                 results['urls'].append({
-                    'item': '도메인 정보',
-                    'value': f"'{hostname}' (생성일: {domain_info.get('creation_date', 'N/A')})",
+                findings.append({
+                    'item': f'도메인 정보 - {hostname}', 
+                    'value': f"생성일: {whois_report.get('creation_date', 'N/A')[:10]}", 
                     'status': 'info'
                 })
+        
+        # 2. VirusTotal 도메인 평판 조회
+        vt_report = get_vt_report_from_api("domain", hostname)
+        if vt_report and 'positives' in vt_report and 'total' in vt_report:
+            positives = vt_report["positives"]
+            total = vt_report["total"]
+            
+            if positives > 0:
+                findings.append({
+                    'item': f'VirusTotal 평판 - {hostname}', 
+                    'value': f"악성/의심 탐지: {positives}/{total} 엔진에서 위험으로 분류", 
+                    'status': 'danger'
+                })
+                scores += min(positives * 10, 50)  # 최대 50점까지만 추가
+            elif total > 0:
+                findings.append({
+                    'item': f'VirusTotal 평판 - {hostname}', 
+                    'value': f"검사 완료: {total}개 엔진에서 위험 요소 발견되지 않음", 
+                    'status': 'safe'
+                })
+    
+    return findings, scores
+
+def get_file_reputation_findings(hashes):
+    """파일 해시 평판 분석 결과를 리스트로 반환합니다."""
+    findings = []
+    scores = 0
+    
+    for file_hash in hashes:
+        vt_report = get_vt_report_from_api("file", file_hash)
+        if vt_report and 'positives' in vt_report and 'total' in vt_report:
+            positives = vt_report["positives"]
+            total = vt_report["total"]
+            
+            if positives > 0:
+                findings.append({
+                    'item': f'파일 평판 - {file_hash[:16]}...', 
+                    'value': f"악성/의심 탐지: {positives}/{total} 엔진에서 위험으로 분류", 
+                    'status': 'danger'
+                })
+                scores += min(positives * 10, 50)  # 최대 50점까지만 추가
+            elif total > 0:
+                findings.append({
+                    'item': f'파일 평판 - {file_hash[:16]}...', 
+                    'value': f"검사 완료: {total}개 엔진에서 위험 요소 발견되지 않음", 
+                    'status': 'safe'
+                })
+    
+    return findings, scores
 
 
 def calculate_summary(results):
@@ -434,14 +461,6 @@ st.markdown("""
 def main():
     st.markdown('<div style="text-align: center;"><h1>📧 피싱 메일 분석</h1></div>', unsafe_allow_html=True)
     st.markdown('<div style="text-align: center; font-size: 1.2em; opacity: 0.9; margin-bottom: 2rem;">의심스러운 이메일 파일을 업로드하여 위험 요소를 정밀 분석해보세요</div>', unsafe_allow_html=True)
-    
-    # [추가됨] VirusTotal API 키 입력
-    st.markdown("### 🔑 VirusTotal API 키 (선택 사항)")
-    vt_api_key = st.text_input(
-        "API 키를 입력하면 URL/파일 평판 조회를 통해 탐지율을 높일 수 있습니다.", 
-        type="password",
-        help="VirusTotal에 가입하여 무료 API 키를 발급받을 수 있습니다."
-    )
 
     if not OPENCV_AVAILABLE:
         st.warning("🔍 QR 코드 스캔을 위한 OpenCV 라이브러리를 찾을 수 없습니다. 'pip install opencv-python'으로 설치하시면 더 정확한 분석이 가능합니다.")
@@ -456,9 +475,10 @@ def main():
 
     if uploaded_file is not None:
         with st.spinner('📊 이메일을 정밀 분석 중입니다... (외부 API 조회로 인해 시간이 걸릴 수 있습니다)'):
+            st.session_state.vt_key_missing = False
+
             eml_content = uploaded_file.getvalue().decode('utf-8', errors='ignore')
             
-            # 분석 실행
             msg = email.message_from_string(eml_content)
             results = {
                 'header': [], 'body': [], 'attachments': [], 'urls': [],
@@ -468,48 +488,48 @@ def main():
             
             analyze_headers(msg, results)
             
-            # 이메일 파트 순회
             for part in msg.walk():
-                if part.is_multipart():
-                    continue
+                if part.is_multipart(): continue
                 if part.get_content_disposition() == 'attachment':
                     analyze_attachment(part, results)
                 elif part.get_content_type() == 'text/html':
                     payload = part.get_payload(decode=True)
                     charset = part.get_content_charset() or 'utf-8'
-                    try:
-                        html_content = payload.decode(charset, errors='ignore')
-                    except LookupError:
-                        html_content = payload.decode('cp949', errors='ignore')
+                    try: html_content = payload.decode(charset, errors='ignore')
+                    except LookupError: html_content = payload.decode('cp949', errors='ignore')
                     analyze_html_body(html_content, results)
 
-            # 고유 호스트네임, URL, 파일 해시 추출
+            # 고유 호스트네임 및 파일 해시 추출
             unique_hostnames = set()
-            unique_urls = set()
             unique_hashes = set()
 
+            # URL 분석에서 도메인 추출
             for url_item in results['urls']:
-                try:
-                    raw_url = url_item['value'].split(' ')[0]
-                    unique_urls.add(raw_url)
-                    hostname = urlparse(unquote(raw_url)).hostname
-                    if hostname: unique_hostnames.add(hostname)
-                except Exception: continue
+                if 'Domain:' in url_item['value']:
+                    domain = url_item['value'].split('Domain: ')[1].split(' - ')[0]
+                    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', domain):
+                        unique_hostnames.add(domain)
             
             for att_item in results['attachments']:
                 if att_item['item'] == '파일 해시 (SHA-256)':
                     unique_hashes.add(att_item['value'])
 
-            # 외부 API 연동 분석
+            # 외부 API 연동 분석 호출 및 결과 통합
             if unique_hostnames:
-                analyze_reputation(unique_hostnames, "도메인", vt_api_key, results) # Whois
-            if unique_urls and vt_api_key:
-                analyze_reputation(unique_urls, "URL", vt_api_key, results) # VirusTotal URL
-            if unique_hashes and vt_api_key:
-                analyze_reputation(unique_hashes, "파일 해시", vt_api_key, results) # VirusTotal File
+                domain_findings, domain_scores = get_domain_reputation_findings(unique_hostnames)
+                results['urls'].extend(domain_findings)
+                results['riskScores']['urls'] += domain_scores
+            
+            if unique_hashes:
+                file_findings, file_scores = get_file_reputation_findings(unique_hashes)
+                results['attachments'].extend(file_findings)
+                results['riskScores']['attachments'] += file_scores
 
             calculate_summary(results)
             display_results(results)
+            
+            if st.session_state.vt_key_missing:
+                st.warning("백엔드 서버에 VirusTotal API 키가 설정되지 않아 평판 조회를 건너뛰었습니다.")
 
 
 def display_results(results):

@@ -60,6 +60,26 @@ class DBManager:
             print(f"데이터 조회 오류: {e}")
             return []
 
+    def get_question_by_id(self, question_id: int):
+        """
+        특정 ID의 퀴즈 문제를 조회하는 메서드
+        API 서버에서 답변 처리할 때 사용됩니다.
+        """
+        if not self.conn:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id, subject, body, label, explain FROM quiz_questions WHERE id = ?", (question_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                return dict(result)
+            return None
+            
+        except sqlite3.Error as e:
+            print(f"문제 조회 중 오류 발생: {e}")
+            return None
+
     def close(self):
         """데이터베이스 연결을 닫습니다."""
         if self.conn:
